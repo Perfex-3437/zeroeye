@@ -19,6 +19,8 @@ frailbox/build/
 *.d
 
 # Python
+.venv/
+.coverage*
 __pycache__/
 *.pyc
 *.pyo
