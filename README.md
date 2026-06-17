@@ -1,5 +1,13 @@
 # Tent of Trials
 
+<p align="center">
+  <img src="https://img.shields.io/badge/python-3.10%2B-blue?style=flat-square&logo=python" alt="Python">
+  <img src="https://img.shields.io/badge/typescript-5.x-blue?style=flat-square&logo=typescript" alt="TypeScript">
+  <img src="https://img.shields.io/badge/license-MIT%2FApache%202.0-green?style=flat-square" alt="License">
+  <img src="https://img.shields.io/badge/rust-1.70%2B-orange?style=flat-square&logo=rust" alt="Rust">
+  <img src="https://img.shields.io/badge/build-python3%20build.py-lightgrey?style=flat-square" alt="Build">
+</p>
+
 Trading and risk platform.
 
 ## Getting Started
