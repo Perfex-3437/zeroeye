@@ -11,4 +11,3 @@ Coverage includes:
 - authentication, not-found, request-validation, and internal-error cases
 - empty, large, and unicode payload edge cases
 - async request handling through pytest-asyncio
-

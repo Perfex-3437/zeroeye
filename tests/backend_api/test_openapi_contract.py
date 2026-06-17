@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import socket
 
 import pytest
@@ -96,10 +97,8 @@ def test_edge_case_payloads_are_accepted_by_contract_mock(api_client, api_operat
     assert response.status_code in operation.success_statuses
 
 
-@pytest.mark.asyncio
-async def test_async_request_wrapper(api_client, auth_token):
-    response = await api_client.request_async("GET", "/users", token=auth_token)
+def test_async_request_wrapper(api_client, auth_token):
+    response = asyncio.run(api_client.request_async("GET", "/users", token=auth_token))
 
     assert response.status_code == 200
     assert response.body["path"] == "/users"
-

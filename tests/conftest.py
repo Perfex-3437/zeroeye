@@ -53,4 +53,3 @@ def valid_payloads(api_spec, api_operations):
         for operation in api_operations
         if operation.request_body_required
     }
-
