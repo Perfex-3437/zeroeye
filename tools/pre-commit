@@ -1,0 +1,381 @@
+#!/usr/bin/env python3
+"""
+Pre-commit hook for Kickama (Tent of Trials).
+
+Performs:
+  1. Code style checks (Python flake8/pycodestyle)
+  2. Syntax validation (Python, shell scripts)
+  3. Diagnostic generation via build.py
+  4. Stages diagnostic artifacts for commit
+  5. Prints a countdown timer while build.py runs
+  6. Aborts commit on any failure
+
+Symlink this into .git/hooks/pre-commit (or use `make install-hooks`).
+"""
+
+import hashlib
+import os
+import pathlib
+import re
+import subprocess
+import sys
+import time
+import threading
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+DIAGNOSTIC_DIR = ROOT / "diagnostic"
+
+
+# ── helpers ──────────────────────────────────────────────────────────
+
+
+def eprint(*args, **kwargs):
+    """Print to stderr."""
+    print(*args, file=sys.stderr, **kwargs)
+
+
+def color(text, code):
+    """Return coloured text if stderr is a terminal."""
+    if sys.stderr.isatty():
+        return f"\033[{code}m{text}\033[0m"
+    return text
+
+
+def red(text):
+    return color(text, "91")
+
+
+def green(text):
+    return color(text, "92")
+
+
+def yellow(text):
+    return color(text, "93")
+
+
+def cyan(text):
+    return color(text, "96")
+
+
+def gray(text):
+    return color(text, "90")
+
+
+def bold(text):
+    return color(text, "1")
+
+
+def run_cmd(cmd, cwd=None, timeout=300, capture=True):
+    """Run a command, return (returncode, stdout+stderr)."""
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=cwd or str(ROOT),
+            capture_output=capture,
+            text=True,
+            timeout=timeout,
+        )
+        merged = ""
+        if capture:
+            merged = proc.stdout + proc.stderr
+        return proc.returncode, merged
+    except FileNotFoundError:
+        return -1, f"command not found: {cmd[0]}"
+    except subprocess.TimeoutExpired:
+        return -1, f"timed out after {timeout}s"
+    except Exception as exc:
+        return -1, str(exc)
+
+
+# ── step 1: code-style & syntax checks ──────────────────────────────
+
+
+def check_python_syntax(paths):
+    """Check Python files for syntax errors with compile()."""
+    errors = []
+    for p in paths:
+        try:
+            compile(p.read_text(encoding="utf-8"), str(p), "exec")
+        except SyntaxError as exc:
+            errors.append(f"  SyntaxError in {p.relative_to(ROOT)}: {exc}")
+    return errors
+
+
+def check_python_style(paths):
+    """Run pycodestyle on Python files. Report but don't block on style."""
+    try:
+        rc, out = run_cmd(
+            ["pycodestyle", "--max-line-length=100"] + [str(p) for p in paths],
+            timeout=30,
+        )
+    except Exception:
+        return []  # tool not available, skip
+    if rc != 0:
+        issues = out.strip().split("\n")
+        return [f"  {l}" for l in issues if l.strip()]
+    return []
+
+
+def check_shell_syntax(paths):
+    """Check shell scripts with bash -n."""
+    errors = []
+    for p in paths:
+        if not _is_shell_script(p):
+            continue
+        rc, out = run_cmd(["bash", "-n", str(p)], timeout=15)
+        if rc != 0:
+            errors.append(f"  Shell syntax error in {p.relative_to(ROOT)}: {out.strip()}")
+    return errors
+
+
+def _is_shell_script(path):
+    """Heuristic: check first line for #!.*sh or #!.*bash."""
+    try:
+        first = path.read_text(encoding="utf-8", errors="replace")[:128]
+        return re.search(r"^#!\s*(?:/usr)?/bin/(?:env\s+)?(?:sh|bash)", first) is not None
+    except Exception:
+        return False
+
+
+def _get_staged_files():
+    """Return list of staged file paths (Added, Copied, Modified)."""
+    rc, staged_raw = run_cmd(
+        ["git", "diff", "--cached", "--name-only", "--diff-filter=ACM"],
+        timeout=5,
+    )
+    if rc != 0:
+        return []
+    return [ROOT / p for p in staged_raw.strip().split("\n") if p.strip()]
+
+
+# ── step 2: diagnostic build with countdown ────────────────────────
+
+
+def _get_commit_diagnostic_hash(commit="HEAD"):
+    """Return SHA-256 hash of all diagnostic files at a given commit, or None."""
+    try:
+        rc, out = run_cmd(
+            ["git", "ls-tree", "--name-only", commit, "diagnostic/"],
+            timeout=5,
+        )
+        if rc != 0 or not out.strip():
+            return None
+    except Exception:
+        return None
+
+    names = [n.strip() for n in out.strip().split("\n") if n.strip()]
+    if not names:
+        return None
+
+    combined = []
+    for name in names:
+        rc2, content = run_cmd(
+            ["git", "show", f"{commit}:{name}"],
+            timeout=5,
+        )
+        if rc2 == 0:
+            h = hashlib.sha256(content.encode("utf-8", errors="replace")).hexdigest()
+            combined.append((name, h))
+
+    if not combined:
+        return None
+    hasher = hashlib.sha256()
+    for name, h in sorted(combined):
+        hasher.update(f"{name}:{h}\n".encode())
+    return hasher.hexdigest()
+
+
+def _get_working_diagnostic_hash():
+    """Return SHA-256 hash of on-disk diagnostic files, or None."""
+    patterns = sorted(DIAGNOSTIC_DIR.glob("build-*.logd")) + \
+               sorted(DIAGNOSTIC_DIR.glob("build-*.json"))
+    if not patterns:
+        return None
+    combined = []
+    for f in patterns:
+        try:
+            content = f.read_bytes()
+            h = hashlib.sha256(content).hexdigest()
+            combined.append((f.name, h))
+        except Exception:
+            pass
+    if not combined:
+        return None
+    hasher = hashlib.sha256()
+    for name, h in combined:
+        hasher.update(f"{name}:{h}\n".encode())
+    return hasher.hexdigest()
+
+
+def diagnostics_unchanged():
+    """Return True if on-disk diagnostics match last commit."""
+    current = _get_working_diagnostic_hash()
+    last = _get_commit_diagnostic_hash()
+    if current is None and last is None:
+        return False  # no diagnostics at all → need to build
+    return current == last
+
+
+def run_with_countdown(estimated_seconds=300):
+    """Run `python3 build.py` with a live countdown timer on stderr.
+
+    Returns (returncode, full_output).
+    """
+    cmd = [sys.executable or "python3", "build.py"]
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(ROOT),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+
+    start = time.time()
+    out_lines = []
+    done = threading.Event()
+
+    def reader():
+        try:
+            for line in iter(proc.stdout.readline, ""):
+                out_lines.append(line)
+        except ValueError:
+            pass
+        finally:
+            done.set()
+
+    t = threading.Thread(target=reader, daemon=True)
+    t.start()
+
+    # Live countdown while the process is running
+    while not done.is_set():
+        elapsed = time.time() - start
+        remaining = max(0, estimated_seconds - elapsed)
+        mins, secs = divmod(int(remaining), 60)
+        elapsed_m, elapsed_s = divmod(int(elapsed), 60)
+        eprint(
+            f"\r  {cyan('Building')} ... "
+            f"{bold(f'{elapsed_m:02d}:{elapsed_s:02d}')} elapsed / "
+            f"{gray(f'~{mins:02d}:{secs:02d}')} remaining ",
+            end="", flush=True,
+        )
+        time.sleep(1)
+
+    eprint()  # newline after timer
+    proc.wait(timeout=60)
+    rc = proc.returncode
+    output = "".join(out_lines)
+    return rc, output
+
+
+# ── stage diagnostic artifacts ─────────────────────────────────────
+
+
+def stage_diagnostics():
+    """Git-add all diagnostic artifacts. Return count staged."""
+    staged = 0
+    for pattern in ("build-*.logd", "build-*.json"):
+        for f in sorted(DIAGNOSTIC_DIR.glob(pattern)):
+            rc, _ = run_cmd(["git", "add", str(f)], timeout=5)
+            if rc == 0:
+                eprint(f"  {green('▸')} Staged {f.relative_to(ROOT)}")
+                staged += 1
+            else:
+                eprint(f"  {red('✗')} Failed to stage {f.relative_to(ROOT)}")
+    if staged == 0:
+        eprint(f"  {yellow('⚠')} No diagnostic artifacts found to stage")
+    return staged
+
+
+# ── main hook logic ─────────────────────────────────────────────────
+
+
+def main():
+    # Preamble
+    eprint(f"\n  {bold('🔧 Kickama Pre-commit Hook')}")
+    eprint(f"  {gray('─' * 40)}")
+
+    staged_files = _get_staged_files()
+    py_files = [p for p in staged_files if p.suffix == ".py" and p.exists()]
+    sh_files = [p for p in staged_files if (p.suffix == ".sh" or _is_shell_script(p)) and p.exists()]
+
+    errors = []
+
+    # ── 1a. Python syntax check ─────────────────────────────────
+    if py_files:
+        eprint(f"\n  {bold('🔍 Syntax Check')} ({len(py_files)} Python files)")
+        syntax_errors = check_python_syntax(py_files)
+        if syntax_errors:
+            for err in syntax_errors:
+                eprint(f"  {red('✗')} {err}")
+            errors.append("Python syntax errors found")
+        else:
+            eprint(f"  {green('✓')} All Python files pass syntax check")
+    else:
+        eprint(f"\n  {bold('🔍 Syntax Check')} {gray('(no staged Python files)')}")
+
+    # ── 1b. Python style check ──────────────────────────────────
+    if py_files:
+        eprint(f"\n  {bold('🎨 Style Check')} ({len(py_files)} Python files)")
+        style_issues = check_python_style(py_files)
+        if style_issues:
+            eprint(f"  {yellow('⚠')} Style suggestions:")
+            for issue in style_issues[:10]:
+                eprint(f"    {gray(issue)}")
+            if len(style_issues) > 10:
+                eprint(f"    {gray(f'... and {len(style_issues) - 10} more')}")
+        else:
+            eprint(f"  {green('✓')} Style check passed")
+
+    # ── 1c. Shell syntax check ──────────────────────────────────
+    if sh_files:
+        eprint(f"\n  {bold('🐚 Shell Syntax Check')} ({len(sh_files)} shell scripts)")
+        shell_errors = check_shell_syntax(sh_files)
+        if shell_errors:
+            for err in shell_errors:
+                eprint(f"  {red('✗')} {err}")
+            errors.append("Shell syntax errors found")
+        else:
+            eprint(f"  {green('✓')} All shell scripts pass syntax check")
+    else:
+        eprint(f"\n  {bold('🐚 Shell Syntax Check')} {gray('(no staged shell scripts)')}")
+
+    # Abort on syntax failures
+    if errors:
+        eprint(f"\n  {red('✗')} {bold('Pre-commit checks failed:')}")
+        for err in errors:
+            eprint(f"    {red('•')} {err}")
+        eprint(f"\n  {red('Commit aborted. Fix the errors above and try again.')}")
+        return 1
+
+    # ── 2. Diagnostic generation ────────────────────────────────
+    eprint(f"\n  {bold('🔧 Diagnostic Build')}")
+
+    if diagnostics_unchanged():
+        eprint(f"  {green('✓')} Diagnostics unchanged since last commit — skipping rebuild")
+    else:
+        eprint(f"  {gray('Running build.py (this may take a while)...')}")
+        rc, output = run_with_countdown(estimated_seconds=300)
+
+        elapsed_total = time.time()  # approximate
+        if rc != 0:
+            eprint(f"\n  {red('✗')} {bold('build.py failed')} (exit code {rc})")
+            last_lines = output.strip().split("\n")[-15:]
+            eprint(f"  {gray('Last output:')}")
+            for line in last_lines:
+                eprint(f"    {gray(line)}")
+            eprint(f"\n  {red('Commit aborted — fix build errors and try again.')}")
+            return 1
+
+        eprint(f"  {green('✓')} build.py completed successfully")
+
+    # ── 3. Stage diagnostic artifacts ───────────────────────────
+    eprint(f"\n  {bold('📦 Staging diagnostic artifacts')}")
+    stage_diagnostics()
+
+    # ── Done ────────────────────────────────────────────────────
+    eprint(f"\n  {green('✓')} {bold('All pre-commit checks passed')}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
