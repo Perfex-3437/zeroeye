@@ -1,0 +1,133 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Tent of Trials Configuration",
+  "type": "object",
+  "required": ["app", "server", "database"],
+  "properties": {
+    "app": {
+      "type": "object",
+      "required": ["name", "version", "environment"],
+      "properties": {
+        "name": {"type": "string"},
+        "version": {"type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$"},
+        "environment": {"type": "string", "enum": ["development", "staging", "production"]},
+        "debug": {"type": "boolean"},
+        "log_level": {"type": "string", "enum": ["debug", "info", "warn", "error"]},
+        "log_format": {"type": "string"}
+      }
+    },
+    "server": {
+      "type": "object",
+      "properties": {
+        "host": {"type": "string"},
+        "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "read_timeout": {"type": "integer", "minimum": 1},
+        "write_timeout": {"type": "integer", "minimum": 1},
+        "idle_timeout": {"type": "integer", "minimum": 1},
+        "max_header_bytes": {"type": "integer", "minimum": 1024},
+        "shutdown_timeout": {"type": "integer", "minimum": 1}
+      }
+    },
+    "database": {
+      "type": "object",
+      "required": ["host", "port", "name"],
+      "properties": {
+        "host": {"type": "string"},
+        "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "name": {"type": "string"},
+        "user": {"type": "string"},
+        "password": {"type": "string"},
+        "pool_min": {"type": "integer", "minimum": 0},
+        "pool_max": {"type": "integer", "minimum": 1},
+        "timeout_ms": {"type": "integer", "minimum": 100},
+        "ssl_mode": {"type": "string"}
+      }
+    },
+    "redis": {
+      "type": "object",
+      "properties": {
+        "host": {"type": "string"},
+        "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "password": {"type": "string"},
+        "db": {"type": "integer", "minimum": 0},
+        "pool_size": {"type": "integer", "minimum": 1},
+        "timeout_ms": {"type": "integer", "minimum": 100}
+      }
+    },
+    "kafka": {
+      "type": "object",
+      "properties": {
+        "brokers": {"type": "array", "items": {"type": "string"}},
+        "group_id": {"type": "string"},
+        "client_id": {"type": "string"},
+        "timeout_ms": {"type": "integer", "minimum": 100},
+        "retry_count": {"type": "integer", "minimum": 0},
+        "retry_backoff_ms": {"type": "integer", "minimum": 0},
+        "enable_auto_commit": {"type": "boolean"},
+        "auto_commit_interval_ms": {"type": "integer", "minimum": 100}
+      }
+    },
+    "market": {
+      "type": "object",
+      "properties": {
+        "rate_limit_per_second": {"type": "integer", "minimum": 1},
+        "rate_limit_burst": {"type": "integer", "minimum": 1},
+        "orderbook_depth": {"type": "integer", "minimum": 1},
+        "max_order_size": {"type": "number", "minimum": 0},
+        "min_order_size": {"type": "number", "minimum": 0},
+        "max_position_size": {"type": "number", "minimum": 0},
+        "allowed_instruments": {"type": "array", "items": {"type": "string"}},
+        "fees": {
+          "type": "object",
+          "properties": {
+            "maker": {"type": "number", "minimum": 0},
+            "taker": {"type": "number", "minimum": 0},
+            "withdrawal": {"type": "number", "minimum": 0}
+          }
+        }
+      }
+    },
+    "auth": {
+      "type": "object",
+      "properties": {
+        "jwt_secret": {"type": "string"},
+        "jwt_expiry_minutes": {"type": "integer", "minimum": 1},
+        "refresh_token_expiry_days": {"type": "integer", "minimum": 1},
+        "session_timeout_minutes": {"type": "integer", "minimum": 1},
+        "mfa_required": {"type": "boolean"},
+        "max_login_attempts": {"type": "integer", "minimum": 1},
+        "lockout_duration_minutes": {"type": "integer", "minimum": 1},
+        "password_min_length": {"type": "integer", "minimum": 1},
+        "password_require_special": {"type": "boolean"},
+        "password_require_numbers": {"type": "boolean"},
+        "password_require_uppercase": {"type": "boolean"}
+      }
+    },
+    "monitoring": {
+      "type": "object",
+      "properties": {
+        "metrics_enabled": {"type": "boolean"},
+        "metrics_port": {"type": "integer", "minimum": 1024, "maximum": 65535},
+        "tracing_enabled": {"type": "boolean"},
+        "tracing_sample_rate": {"type": "number", "minimum": 0, "maximum": 1},
+        "tracing_endpoint": {"type": "string"},
+        "health_check_enabled": {"type": "boolean"},
+        "profiling_enabled": {"type": "boolean"}
+      }
+    },
+    "features": {
+      "type": "object",
+      "properties": {
+        "web_socket": {"type": "boolean"},
+        "streaming": {"type": "boolean"},
+        "ai_assistant": {"type": "boolean"},
+        "social_trading": {"type": "boolean"},
+        "margin_trading": {"type": "boolean"},
+        "futures_trading": {"type": "boolean"},
+        "options_trading": {"type": "boolean"},
+        "dark_mode": {"type": "boolean"},
+        "ab_testing": {"type": "boolean"}
+      }
+    }
+  }
+}

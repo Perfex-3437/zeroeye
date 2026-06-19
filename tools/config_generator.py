@@ -41,6 +41,80 @@ try:
 except ImportError:
     HAS_TOML = False
 
+# Default schema path
+DEFAULT_SCHEMA_PATH = Path(__file__).resolve().parent.parent / "config" / "config.schema.json"
+
+
+def load_schema(path: Path) -> dict:
+    """Load a JSON Schema file from disk."""
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def validate_config(config: dict, schema: dict) -> list[str]:
+    """Validate a config dict against a JSON Schema, returning all errors.
+
+    Uses a lightweight recursive validator to avoid jsonschema dependency.
+    """
+    errors = []
+    
+    def _validate(value, schema_node, path: str):
+        if not isinstance(schema_node, dict):
+            return
+        
+        # type check
+        expected_type = schema_node.get("type")
+        if expected_type:
+            type_map = {
+                "string": str, "integer": int, "number": (int, float),
+                "boolean": bool, "object": dict, "array": list,
+            }
+            py_type = type_map.get(expected_type)
+            if py_type and not isinstance(value, py_type):
+                errors.append(f"{path}: expected {expected_type}, got {type(value).__name__}")
+                return  # skip further checks for wrong type
+        
+        # enum check
+        enum_vals = schema_node.get("enum")
+        if enum_vals is not None and value not in enum_vals:
+            errors.append(f"{path}: value {value!r} not in allowed {enum_vals}")
+        
+        # string pattern
+        pattern = schema_node.get("pattern")
+        if pattern and isinstance(value, str):
+            import re
+            if not re.match(pattern, value):
+                errors.append(f"{path}: does not match pattern {pattern!r}")
+        
+        # number/int minimum/maximum
+        if isinstance(value, (int, float)):
+            minimum = schema_node.get("minimum")
+            maximum = schema_node.get("maximum")
+            if minimum is not None and value < minimum:
+                errors.append(f"{path}: {value} < minimum {minimum}")
+            if maximum is not None and value > maximum:
+                errors.append(f"{path}: {value} > maximum {maximum}")
+        
+        # object properties
+        if isinstance(value, dict):
+            props = schema_node.get("properties", {})
+            required = schema_node.get("required", [])
+            for r in required:
+                if r not in value:
+                    errors.append(f"{path}.{r}: missing required field")
+            for key, val in value.items():
+                if key in props:
+                    _validate(val, props[key], f"{path}.{key}")
+        
+        # array items
+        if isinstance(value, list):
+            items_schema = schema_node.get("items", {})
+            for i, item in enumerate(value):
+                _validate(item, items_schema, f"{path}[{i}]")
+    
+    _validate(config, schema, "$")
+    return errors
+
 
 # ---------------------------------------------------------------------------
 # CONFIGURATION SCHEMA
@@ -313,12 +387,35 @@ def parse_args():
                        help="Show sensitive values (default: masked)")
     parser.add_argument("--stdout", action="store_true",
                        help="Print to stdout instead of file")
+    parser.add_argument("--validate", action="store_true",
+                       help="Validate config against schema and exit")
+    parser.add_argument("--schema", type=str, default=None,
+                       help="Path to JSON Schema file (default: config/config.schema.json)")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
     config = generate_config(args.env)
+
+    # Schema validation
+    schema_path = Path(args.schema) if args.schema else DEFAULT_SCHEMA_PATH
+    if schema_path.exists():
+        schema = load_schema(schema_path)
+        errors = validate_config(config, schema)
+        if errors:
+            print(f"Config validation errors ({len(errors)}):")
+            for err in errors:
+                print(f"  - {err}")
+            if args.validate:
+                return 1
+        elif args.validate:
+            print("Config validation: PASSED")
+            return 0
+
+    if args.validate:
+        print("No schema found at", schema_path)
+        return 1
 
     if not args.show_sensitive:
         display_config = mask_sensitive(config)

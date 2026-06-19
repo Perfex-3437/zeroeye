@@ -1,0 +1,20 @@
+{
+  "app": {
+    "name": "test",
+    "version": "1.0.0",
+    "environment": "development"
+  },
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8080,
+    "idle_timeout": -5
+  },
+  "database": {
+    "host": "localhost",
+    "port": 5432,
+    "name": "test"
+  },
+  "auth": {
+    "password_min_length": 0
+  }
+}
