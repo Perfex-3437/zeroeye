@@ -85,6 +85,47 @@ Alerts are sent to PagerDuty and Slack (#ops-alerts channel).
 | DBConnectionPool | Pool exhaustion risk | Critical | 10 minutes |
 | QueueBacklog | Queue depth > 10000 for 5 minutes | Warning | 15 minutes |
 
+## Diagnostic Metadata Diff Tool
+
+The `tools/diagnostic_diff.py` script compares two diagnostic metadata JSON files
+(such as `diagnostic/build-XXX.json`) and produces a structured diff showing what
+changed between builds.
+
+### Usage
+
+```bash
+# Human-readable diff
+python3 tools/diagnostic_diff.py diagnostic/build-old.json diagnostic/build-new.json
+
+# Machine-readable JSON output
+python3 tools/diagnostic_diff.py diagnostic/build-old.json diagnostic/build-new.json --json
+```
+
+### Output
+
+The human-readable output includes:
+
+- **Summary line** showing module count changes (old → new)
+- **Regressions** (PASS → FAIL) and **improvements** (FAIL → PASS) counts
+- **Added modules** — modules present in the new build but absent in the old
+- **Removed modules** — modules present in the old build but absent in the new
+- **Changed modules** — per-module details:
+  - Status changes with regression/improvement indicators
+  - Duration deltas in seconds (↑ slower, ↓ faster)
+  - Artifact path changes
+  - Output content changes
+
+The `--json` flag produces a machine-readable JSON object with the same
+information, suitable for programmatic consumption.
+
+### Exit Codes
+
+| Code | Meaning                                  |
+|------|------------------------------------------|
+| 0    | No regressions detected                  |
+| 1    | Regressions detected or comparison done  |
+| 1    | Missing or invalid input file            |
+
 ## Incident Response
 
 ### Severity Levels
