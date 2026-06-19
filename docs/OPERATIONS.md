@@ -310,3 +310,45 @@ Audit logs are retained for 365 days and include:
 2. Update Kubernetes secret: `kubectl create secret tls tot-tls --cert=new.crt --key=new.key -n tent-production --dry-run=client -o yaml | kubectl apply -f -`
 3. Restart services: `kubectl rollout restart deployment -n tent-production`
 4. Verify new certificate: `openssl s_client -connect api.example.com:443 -servername api.example.com`
+
+## Deployment Dry-Run Mode
+
+The `tools/deploy.py` script supports a `--dry-run` flag that shows a complete deployment plan without executing any actions. This is useful for:
+
+- Reviewing deployment changes before applying them
+- CI/CD validation pipelines
+- Training and onboarding
+- Verifying environment configuration
+
+### Usage
+
+```bash
+# Dry-run a deployment
+python3 tools/deploy.py --env staging --service backend --dry-run
+
+# Dry-run with all services
+python3 tools/deploy.py --env production --service all --tag v3.2.0 --dry-run
+
+# Dry-run a rollback
+python3 tools/deploy.py --env production --service backend --rollback --version v3.1.0 --dry-run
+
+# Dry-run with skipped steps
+python3 tools/deploy.py --env development --service frontend --skip-build --skip-test --dry-run
+```
+
+### What dry-run mode displays
+
+1. **Environment info** — target environment, services, and tag/version
+2. **Phase-by-phase breakdown** — each action is grouped by deployment phase (Build, Test, Containerize, Push, Deploy, Verify)
+3. **Commands** — every shell command that would be executed
+4. **Target files** — file paths (build artifacts, manifests, Dockerfiles)
+5. **Environment variables** — variable names and values used during deployment (secrets redacted)
+6. **Skipped steps** — any steps skipped via `--skip-*` flags are clearly marked
+7. **Summary line** — total number of actions and phases
+
+### Safety guarantees
+
+- **No network connections** — dry-run mode never calls `kubectl`, `docker push`, `curl`, or any service that modifies remote state
+- **No remote state changes** — deployment history is not written to disk
+- **Secrets redacted** — environment variable values whose names contain `TOKEN`, `SECRET`, `KEY`, or `PASSWORD` are partially redacted (shows first 2 and last 2 characters)
+- **Local-only** — all planning happens entirely in-process using configuration constants

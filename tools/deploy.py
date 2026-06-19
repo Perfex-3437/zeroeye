@@ -382,9 +382,268 @@ def parse_args():
     parser.add_argument("--rollback", action="store_true", help="Rollback instead of deploy")
     parser.add_argument("--version", help="Version to rollback to")
     parser.add_argument("--list", action="store_true", help="List deployments")
-    parser.add_argument("--dry-run", action="store_true", help="Show what would be done")
+    parser.add_argument("--dry-run", action="store_true",
+                       help="Show deployment plan without executing (dry-run mode)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
     return parser.parse_args()
+
+
+# ---------------------------------------------------------------------------
+# DRY-RUN HELPERS
+# ---------------------------------------------------------------------------
+
+def _redact(value: str, var_name: str) -> str:
+    """Redact sensitive values if the variable name contains TOKEN, SECRET, KEY, or PASSWORD."""
+    upper_name = var_name.upper()
+    for keyword in ("TOKEN", "SECRET", "KEY", "PASSWORD"):
+        if keyword in upper_name:
+            if len(value) <= 4:
+                return "****"
+            return value[:2] + "****" + value[-2:]
+    return value
+
+
+def _env_vars_for_service(service: str) -> list[tuple[str, str]]:
+    """Return (name, value) pairs of environment variables relevant to a service."""
+    config = SERVICES.get(service)
+    if not config:
+        return []
+    vars_found = []
+    hints = [
+        ("DEPLOY_ENV", os.environ.get("DEPLOY_ENV", "")),
+        ("KUBECONFIG", os.environ.get("KUBECONFIG", "")),
+        ("DOCKER_HOST", os.environ.get("DOCKER_HOST", "")),
+        ("DOCKER_CONFIG", os.environ.get("DOCKER_CONFIG", "")),
+        ("AWS_PROFILE", os.environ.get("AWS_PROFILE", "")),
+        ("AWS_REGION", os.environ.get("AWS_REGION", "")),
+        ("KUBE_CONTEXT", os.environ.get("KUBE_CONTEXT", "")),
+        ("CI", os.environ.get("CI", "")),
+        ("REGISTRY", os.environ.get("REGISTRY", "")),
+    ]
+    for name, value in hints:
+        if value:
+            vars_found.append((name, _redact(value, name)))
+    # Add all USER / HOME / PATH as informational (non-sensitive context)
+    for name in ("USER", "HOME", "PATH"):
+        value = os.environ.get(name, "")
+        if value:
+            vars_found.append((name, value))
+    return vars_found
+
+
+def _plan_rollback_dry_run(service: str, env: str, version: str) -> list[dict]:
+    """Generate a detailed action plan for a rollback dry run."""
+    env_config = ENVIRONMENTS.get(env)
+    service_config = SERVICES.get(service)
+    actions = []
+
+    actions.append({
+        "phase": "Rollback: Plan",
+        "action": "Rollback service",
+        "details": f"Roll back {service} ({service_config['name']}) in {env} to version {version}",
+        "command": None,
+    })
+
+    actions.append({
+        "phase": "Rollback: Re-deploy",
+        "action": "Re-deploy previous version",
+        "details": f"Will run deploy_service({service}, {env}, {version}, skip_build=True, skip_test=True, skip_health=False)",
+        "command": ["python3", "deploy.py", "--env", env, "--service", service, "--tag", version],
+    })
+
+    actions.append({
+        "phase": "Rollback: Verify",
+        "action": "Health check",
+        "details": f"Health endpoint: http://{env_config['host']}:{service_config['port']}{service_config['health_endpoint']}",
+        "command": ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                     f"http://{env_config['host']}:{service_config['port']}{service_config['health_endpoint']}"],
+    })
+
+    return actions
+
+
+def _plan_service_dry_run(service: str, env: str, tag: str,
+                          skip_build: bool, skip_test: bool,
+                          skip_health: bool) -> list[dict]:
+    """Generate a detailed action plan for deploying a single service (dry-run)."""
+    config = SERVICES.get(service)
+    env_config = ENVIRONMENTS.get(env)
+    actions = []
+
+    # Phase 1: Build
+    actions.append({
+        "phase": "1. Build",
+        "action": f"Build {service} ({config['language']})",
+        "details": f"Source: {config['build_path']}",
+        "command": ["sh", "-c", config["build_command"]],
+        "skip": skip_build,
+    })
+
+    # Phase 2: Test
+    actions.append({
+        "phase": "2. Test",
+        "action": f"Run tests for {service}",
+        "details": f"Test command: {config['test_command']}",
+        "command": ["sh", "-c", config["test_command"]],
+        "skip": skip_test,
+    })
+
+    # Phase 3: Docker build
+    image_name = f"tent/{service}:{tag}"
+    actions.append({
+        "phase": "3. Containerize",
+        "action": "Build Docker image",
+        "details": f"Image: {image_name}",
+        "command": ["docker", "build", "-t", image_name, "-f", config["dockerfile"], "."],
+        "skip": False,
+    })
+
+    # Phase 4: Docker push
+    registry = os.environ.get("REGISTRY", "registry.example.com")
+    remote_image = f"{registry}/tent/{service}:{tag}"
+    actions.append({
+        "phase": "4. Push",
+        "action": "Push Docker image to registry",
+        "details": f"Registry: {registry}\nRemote image: {remote_image}",
+        "command": ["docker", "push", remote_image],
+        "skip": False,
+    })
+
+    # Phase 5: Deploy to Kubernetes
+    namespace = env_config["namespace"]
+    manifest_file = f"deploy/k8s/{service}.yaml"
+    replicas = config["replicas"].get(env, 1)
+    actions.append({
+        "phase": "5. Deploy",
+        "action": "Apply Kubernetes manifest",
+        "details": f"Manifest: {manifest_file}\nNamespace: {namespace}\nContext: {env_config['kube_context']}\nReplicas: {replicas}\nImage: {remote_image}",
+        "command": ["kubectl", "apply", "-f", manifest_file, "-n", namespace,
+                     "--context", env_config["kube_context"]],
+        "skip": False,
+    })
+
+    actions.append({
+        "phase": "5. Deploy",
+        "action": "Set deployment image",
+        "details": f"Deployment: {config['name']}\nImage: {remote_image}",
+        "command": ["kubectl", "set", "image", f"deployment/{config['name']}",
+                     f"{service}={remote_image}", "-n", namespace,
+                     "--context", env_config["kube_context"]],
+        "skip": False,
+    })
+
+    actions.append({
+        "phase": "5. Deploy",
+        "action": "Scale replicas",
+        "details": f"Deployment: {config['name']}\nReplicas: {replicas}",
+        "command": ["kubectl", "scale", f"deployment/{config['name']}",
+                     f"--replicas={replicas}", "-n", namespace,
+                     "--context", env_config["kube_context"]],
+        "skip": False,
+    })
+
+    actions.append({
+        "phase": "5. Deploy",
+        "action": "Wait for rollout",
+        "details": f"Timeout: 300s",
+        "command": ["kubectl", "rollout", "status", f"deployment/{config['name']}",
+                     "-n", namespace, "--context", env_config["kube_context"],
+                     "--timeout=300s"],
+        "skip": False,
+    })
+
+    # Phase 6: Health check
+    health_url = f"http://{env_config['host']}:{config['port']}{config['health_endpoint']}"
+    actions.append({
+        "phase": "6. Verify",
+        "action": "Health check",
+        "details": f"URL: {health_url}\nRetries: 30 (every 2s)",
+        "command": ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", health_url],
+        "skip": skip_health,
+    })
+
+    return actions
+
+
+def _print_dry_run_plan(actions: list[dict], services: list[str], env: str, tag: str):
+    """Print a formatted dry-run plan with phases."""
+    print()
+    print("=" * 70)
+    print("  DEPLOYMENT PLAN  (DRY-RUN MODE)")
+    print("=" * 70)
+    print(f"  Environment:     {env}")
+    print(f"  Services:        {', '.join(services)}")
+    print(f"  Tag/Version:     {tag}")
+    print(f"  Timestamp:       {datetime.now().isoformat()}")
+    print("=" * 70)
+    print()
+
+    # Collect unique phases preserving order
+    seen_phases: list[str] = []
+    for a in actions:
+        if a["phase"] not in seen_phases:
+            seen_phases.append(a["phase"])
+
+    action_count = 0
+    for phase in seen_phases:
+        phase_actions = [a for a in actions if a["phase"] == phase]
+        skipped = any(a.get("skip") for a in phase_actions)
+
+        print(f"  [{phase}]" + ("  (SKIPPED)" if skipped else ""))
+        print("-" * 70)
+        for a in phase_actions:
+            if a.get("skip"):
+                print(f"    {a['action']:40s}  ⏭  SKIPPED")
+                continue
+            action_count += 1
+            print(f"    {a['action']:40s}  {a['details'].split(chr(10))[0]}")
+            if a["command"]:
+                print(f"    {'Command:':40s}  {' '.join(a['command'][:3])}{' ...' if len(a['command']) > 3 else ''}")
+        print()
+
+    # Environment variables
+    all_vars: list[tuple[str, str]] = []
+    for s in services:
+        all_vars.extend(_env_vars_for_service(s))
+    if all_vars:
+        print(f"  [Environment Variables]")
+        print("-" * 70)
+        for name, value in sorted(set(all_vars), key=lambda x: x[0]):
+            print(f"    {name:30s}  {value}")
+        print()
+
+    print("=" * 70)
+    print(f"  SUMMARY: {action_count} action(s) would be executed in {len(seen_phases)} phase(s).")
+    print(f"  NOTE: No network connections or remote state changes were made.")
+    print("=" * 70)
+    print()
+
+
+def dry_run_deploy(args) -> int:
+    """Execute a full dry-run plan. Never touches remote systems."""
+    services = list(SERVICES.keys()) if args.service == "all" else [args.service]
+
+    if args.rollback:
+        if not args.version:
+            print("ERROR: --version is required for rollback")
+            return 1
+        if args.service == "all":
+            print("ERROR: Cannot rollback all services simultaneously")
+            return 1
+        actions = _plan_rollback_dry_run(args.service, args.env, args.version)
+        _print_dry_run_plan(actions, [args.service], args.env, args.version)
+        return 0
+
+    all_actions: list[dict] = []
+    for s in services:
+        service_actions = _plan_service_dry_run(
+            s, args.env, args.tag,
+            args.skip_build, args.skip_test, args.skip_health,
+        )
+        all_actions.extend(service_actions)
+
+    _print_dry_run_plan(all_actions, services, args.env, args.tag)
+    return 0
 
 
 def main():
@@ -393,6 +652,9 @@ def main():
     if args.list:
         list_deployments(args.env, args.service if args.service != "all" else None)
         return 0
+
+    if args.dry_run:
+        return dry_run_deploy(args)
 
     if args.rollback:
         if not args.version:
@@ -403,21 +665,10 @@ def main():
             print("ERROR: Cannot rollback all services simultaneously")
             return 1
 
-        if args.dry_run:
-            print(f"Would rollback {args.service} in {args.env} to {args.version}")
-            return 0
-
         success = rollback_service(args.service, args.env, args.version)
         return 0 if success else 1
 
     services = list(SERVICES.keys()) if args.service == "all" else [args.service]
-
-    if args.dry_run:
-        print(f"Would deploy to {args.env}:")
-        for s in services:
-            print(f"  {s}: tag={args.tag}, build={not args.skip_build}, "
-                  f"test={not args.skip_test}")
-        return 0
 
     all_successful = True
     for service in services:
