@@ -118,6 +118,26 @@ class DataGenerator:
         self.order_counter = 0
         self.trade_counter = 0
 
+    def _random_phone(self) -> str:
+        return f"+1-{self.random.randint(200, 999)}-{self.random.randint(100, 999)}-{self.random.randint(1000, 9999)}"
+
+    def _random_email(self, first: str, last: str) -> str:
+        domain = self.random.choice(DOMAINS)
+        pattern = self.random.choice([
+            f"{first.lower()}.{last.lower()}",
+            f"{first.lower()}{last.lower()}",
+            f"{first[0].lower()}{last.lower()}",
+            f"{last.lower()}.{first.lower()}",
+            f"{first.lower()}{self.random.randint(1, 999)}",
+        ])
+        return f"{pattern}@{domain}"
+
+    def _random_datetime(self, start_year: int = 2023, end_year: int = 2024) -> datetime:
+        start = datetime(start_year, 1, 1, tzinfo=timezone.utc)
+        end = datetime(end_year, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
+        delta = end - start
+        return start + timedelta(seconds=self.random.randint(0, int(delta.total_seconds())))
+
     def generate_users(self, count: int = 50) -> List[Dict[str, Any]]:
         self.users = []
         for _ in range(count):
@@ -126,16 +146,16 @@ class DataGenerator:
             last = self.random.choice(LAST_NAMES)
             user = {
                 "id": f"user_{self.user_counter:04d}",
-                "email": random_email(first, last),
+                "email": self._random_email(first, last),
                 "name": f"{first} {last}",
                 "role": self.random.choice(["trader", "trader", "trader", "admin",
                                             "analyst", "viewer"]),
                 "status": self.random.choice(["active", "active", "active", "active", "inactive"]),
                 "mfa_enabled": self.random.random() < 0.3,
                 "email_verified": self.random.random() < 0.95,
-                "created_at": random_datetime().isoformat(),
-                "last_login": random_datetime(2024, 2024).isoformat(),
-                "phone": random_phone(),
+                "created_at": self._random_datetime().isoformat(),
+                "last_login": self._random_datetime(2024, 2024).isoformat(),
+                "phone": self._random_phone(),
                 "preferences": {
                     "theme": self.random.choice(["dark", "light"]),
                     "language": "en",
@@ -294,7 +314,8 @@ class DataGenerator:
 def parse_args():
     parser = argparse.ArgumentParser(description="Test data generator")
     parser.add_argument("--output-dir", "-o", default="./test_data", help="Output directory")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument("--seed", type=int, default=None, help="Random seed (default: random)")
+    parser.add_argument("--print-seed", action="store_true", help="Print seed and exit")
     parser.add_argument("--users", type=int, default=50, help="Number of users to generate")
     parser.add_argument("--orders", type=int, default=200, help="Number of orders to generate")
     parser.add_argument("--trades", type=int, default=500, help="Number of trades to generate")
@@ -308,6 +329,21 @@ def parse_args():
 
 def main():
     args = parse_args()
+    
+    # Handle --print-seed
+    if args.print_seed:
+        import time
+        demo_seed = int(time.time())
+        print(f"Current seed would be: {args.seed if args.seed is not None else demo_seed}")
+        print(f"Use --seed <number> to reproduce output")
+        return 0
+    
+    # Generate random seed if not provided
+    if args.seed is None:
+        import time
+        args.seed = int(time.time())
+        print(f"Using random seed: {args.seed} (use --seed {args.seed} to reproduce)")
+    
     gen = DataGenerator(args.seed)
 
     os.makedirs(args.output_dir, exist_ok=True)
