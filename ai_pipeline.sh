@@ -15,6 +15,8 @@
 #   ./ai_pipeline.sh --mode deploy       # Deploy to production
 #   ./ai_pipeline.sh --dry-run           # Show what would be done
 #   ./ai_pipeline.sh --watch-gpu         # Monitor GPU usage during training
+#   ./ai_pipeline.sh --timing-report     # Print timing summary at the end
+#   ./ai_pipeline.sh --budget 30         # Mark stages over N seconds as OVER BUDGET
 #
 # Requirements:
 #   - Python 3.8+ with torch, transformers, numpy
@@ -52,6 +54,9 @@ NUM_EPOCHS="${NUM_EPOCHS:-100}"
 MODEL_NAME="${MODEL_NAME:-tent-neural-ensemble-v2}"
 VALIDATION_SPLIT="${VALIDATION_SPLIT:-0.2}"
 
+# Budget threshold (seconds) – stages exceeding this are flagged as over budget
+BUDGET_THRESHOLD="${BUDGET_THRESHOLD:-0}"
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -64,6 +69,11 @@ NC='\033[0m' # No Color
 # Timestamp
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 LOG_FILE="$PROJECT_ROOT/logs/ai_pipeline_${TIMESTAMP}.log"
+
+# Timing storage – associative arrays for per-stage timing
+declare -A PHASE_START
+declare -A PHASE_ELAPSED
+PHASE_ORDER=()
 
 # ---------------------------------------------------------------------------
 # Utility Functions
@@ -81,6 +91,7 @@ log() {
         "STEP")    color="${BLUE}" ;;
         "DONE")    color="${GREEN}" ;;
         "GPU")     color="${MAGENTA}" ;;
+        "BUDGET")  color="${YELLOW}" ;;
         *)         color="${NC}" ;;
     esac
     
@@ -103,10 +114,140 @@ create_directories() {
 }
 
 # ---------------------------------------------------------------------------
+# Timing Functions
+# ---------------------------------------------------------------------------
+
+phase_start() {
+    local name="$1"
+    PHASE_START["$name"]=$(date +%s%N)
+    PHASE_ORDER+=("$name")
+}
+
+phase_end() {
+    local name="$1"
+    local now
+    now=$(date +%s%N)
+    local start_ns="${PHASE_START[$name]:-0}"
+    if [ "$start_ns" -gt 0 ]; then
+        local elapsed_ns=$(( now - start_ns ))
+        local elapsed_sec
+        elapsed_sec=$(echo "scale=3; $elapsed_ns / 1000000000" | bc 2>/dev/null || echo "0")
+        PHASE_ELAPSED["$name"]="$elapsed_sec"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Timing Report
+# ---------------------------------------------------------------------------
+
+print_timing_summary_text() {
+    local budget="$1"
+    echo ""
+    echo -e "${CYAN}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║${NC}              AI PIPELINE TIMING BUDGET SUMMARY              ${CYAN}║${NC}"
+    echo -e "${CYAN}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+
+    local total=0
+    local slowest_name=""
+    local slowest_time=0
+    local over_budget=false
+
+    for phase_name in "${PHASE_ORDER[@]}"; do
+        local elapsed="${PHASE_ELAPSED[$phase_name]:-0}"
+        total=$(echo "scale=3; $total + $elapsed" | bc 2>/dev/null || echo "$total")
+        
+        local flag=""
+        if [ "$(echo "$elapsed > $slowest_time" | bc 2>/dev/null || echo "0")" = "1" ]; then
+            slowest_name="$phase_name"
+            slowest_time="$elapsed"
+        fi
+
+        if [ "$budget" -gt 0 ] && [ "$(echo "$elapsed > $budget" | bc 2>/dev/null || echo "0")" = "1" ]; then
+            flag=" ${YELLOW}*** OVER BUDGET (${budget}s)${NC}"
+            over_budget=true
+        fi
+
+        printf "  %-40s %8.2fs%s\n" "$phase_name" "$elapsed" "$flag"
+    done
+
+    echo ""
+    echo -e "${CYAN}  ───────────────────────────────────────────────────────${NC}"
+    printf "  %-40s %8.2fs\n" "TOTAL" "$total"
+    echo ""
+    echo "  Slowest stage: $slowest_name (${slowest_time}s)"
+
+    if [ "$budget" -gt 0 ]; then
+        if [ "$over_budget" = true ]; then
+            echo -e "  ${YELLOW}⚠ Some stages exceeded the ${budget}s budget threshold${NC}"
+        else
+            echo -e "  ${GREEN}✓ All stages within the ${budget}s budget threshold${NC}"
+        fi
+    fi
+    echo ""
+}
+
+generate_timing_report_json() {
+    local budget="$1"
+    local json_file="$2"
+    local total=0
+    local slowest_name=""
+    local slowest_time=0
+    local stages_json=""
+
+    local first=true
+    for phase_name in "${PHASE_ORDER[@]}"; do
+        local elapsed="${PHASE_ELAPSED[$phase_name]:-0}"
+        total=$(echo "scale=3; $total + $elapsed" | bc 2>/dev/null || echo "$total")
+        
+        if [ "$(echo "$elapsed > $slowest_time" | bc 2>/dev/null || echo "0")" = "1" ]; then
+            slowest_name="$phase_name"
+            slowest_time="$elapsed"
+        fi
+
+        local over_budget_flag=false
+        if [ "$budget" -gt 0 ] && [ "$(echo "$elapsed > $budget" | bc 2>/dev/null || echo "0")" = "1" ]; then
+            over_budget_flag=true
+        fi
+
+        if [ "$first" = true ]; then
+            first=false
+        else
+            stages_json+=","
+        fi
+        stages_json+=$(cat <<EOF
+    {
+      "stage": "$phase_name",
+      "elapsed_seconds": $elapsed,
+      "over_budget": $over_budget_flag
+    }
+EOF
+        )
+    done
+
+    cat > "$json_file" <<EOF
+{
+  "report_type": "ai_pipeline_timing_budget_summary",
+  "generated_at": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+  "model_name": "$MODEL_NAME",
+  "budget_threshold_seconds": $budget,
+  "slowest_stage": "$slowest_name",
+  "slowest_stage_seconds": $slowest_time,
+  "total_duration_seconds": $total,
+  "stages": [
+$stages_json
+  ]
+}
+EOF
+    log "INFO" "Timing report saved to $json_file"
+}
+
+# ---------------------------------------------------------------------------
 # Pipeline Phases
 # ---------------------------------------------------------------------------
 
 phase_data_preparation() {
+    phase_start "data_preparation"
     log "STEP" "╔══════════════════════════════════════════════════════════════╗"
     log "STEP" "║   PHASE 1: DATA PREPARATION                                ║"
     log "STEP" "╚══════════════════════════════════════════════════════════════╝"
@@ -122,9 +263,11 @@ phase_data_preparation() {
     sleep 0.5
     
     log "DONE" "Data preparation complete. 10,000 samples ready for training."
+    phase_end "data_preparation"
 }
 
 phase_backend_training() {
+    phase_start "backend_training"
     log "STEP" "╔══════════════════════════════════════════════════════════════╗"
     log "STEP" "║   PHASE 2: BACKEND RUST MODEL TRAINING                      ║"
     log "STEP" "╚══════════════════════════════════════════════════════════════╝"
@@ -142,9 +285,11 @@ phase_backend_training() {
     fi
     
     log "DONE" "Backend model training complete."
+    phase_end "backend_training"
 }
 
 phase_market_training() {
+    phase_start "market_training"
     log "STEP" "╔══════════════════════════════════════════════════════════════╗"
     log "STEP" "║   PHASE 3: MARKET GO MODEL TRAINING                         ║"
     log "STEP" "╚══════════════════════════════════════════════════════════════╝"
@@ -157,9 +302,11 @@ phase_market_training() {
     sleep 3
     
     log "DONE" "Market model training complete. Best accuracy: 67.3%"
+    phase_end "market_training"
 }
 
 phase_frontend_training() {
+    phase_start "frontend_training"
     log "STEP" "╔══════════════════════════════════════════════════════════════╗"
     log "STEP" "║   PHASE 4: FRONTEND TYPESCRIPT MODEL QUANTIZATION           ║"
     log "STEP" "╚══════════════════════════════════════════════════════════════╝"
@@ -177,9 +324,11 @@ phase_frontend_training() {
     fi
     
     log "DONE" "Frontend model quantization complete."
+    phase_end "frontend_training"
 }
 
 phase_tools_training() {
+    phase_start "tools_training"
     log "STEP" "╔══════════════════════════════════════════════════════════════╗"
     log "STEP" "║   PHASE 5: PYTHON TOOLS MODEL TRAINING                      ║"
     log "STEP" "╚══════════════════════════════════════════════════════════════╝"
@@ -192,9 +341,11 @@ phase_tools_training() {
     sleep 1
     
     log "DONE" "Python tools model training complete."
+    phase_end "tools_training"
 }
 
 phase_frailbox_training() {
+    phase_start "frailbox_training"
     log "STEP" "╔══════════════════════════════════════════════════════════════╗"
     log "STEP" "║   PHASE 6: FRAILBOX C++ MODEL COMPILATION                   ║"
     log "STEP" "╚══════════════════════════════════════════════════════════════╝"
@@ -212,9 +363,11 @@ phase_frailbox_training() {
     fi
     
     log "DONE" "Frailbox model compilation complete."
+    phase_end "frailbox_training"
 }
 
 phase_evaluation() {
+    phase_start "evaluation"
     log "STEP" "╔══════════════════════════════════════════════════════════════╗"
     log "STEP" "║   PHASE 7: MODEL EVALUATION                                 ║"
     log "STEP" "╚══════════════════════════════════════════════════════════════╝"
@@ -258,9 +411,11 @@ Frailbox:
 EVALREPORT
 
     log "DONE" "Evaluation complete. Report saved to metrics/."
+    phase_end "evaluation"
 }
 
 phase_deployment() {
+    phase_start "deployment"
     log "STEP" "╔══════════════════════════════════════════════════════════════╗"
     log "STEP" "║   PHASE 8: DEPLOYMENT                                      ║"
     log "STEP" "╚══════════════════════════════════════════════════════════════╝"
@@ -275,6 +430,7 @@ phase_deployment() {
     sleep 2
     
     log "DONE" "Deployment complete. Models are live."
+    phase_end "deployment"
 }
 
 phase_gpu_monitoring() {
@@ -309,12 +465,16 @@ main() {
     local mode="${1:-full}"
     local dry_run="${2:-false}"
     local watch_gpu="${3:-false}"
+    local timing_report="${4:-false}"
     
     echo ""
     echo -e "${CYAN}╔══════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${CYAN}║${NC}        Tent of Trials  -  AI Training Pipeline              ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}        Model: ${MODEL_NAME}                                ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}        Mode: ${mode}                                        ${CYAN}║${NC}"
+    if [ "$BUDGET_THRESHOLD" -gt 0 ]; then
+        echo -e "${CYAN}║${NC}        Budget: ${BUDGET_THRESHOLD}s threshold                         ${CYAN}║${NC}"
+    fi
     echo -e "${CYAN}╚══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
     
@@ -398,6 +558,13 @@ main() {
         kill "$gpu_pid" 2>/dev/null || true
     fi
     
+    # Print timing summary
+    if [ "$timing_report" = true ]; then
+        print_timing_summary_text "$BUDGET_THRESHOLD"
+        local json_report="$PROJECT_ROOT/metrics/timing_report_${TIMESTAMP}.json"
+        generate_timing_report_json "$BUDGET_THRESHOLD" "$json_report"
+    fi
+    
     echo ""
     log "DONE" "╔══════════════════════════════════════════════════════════════╗"
     log "DONE" "║   PIPELINE COMPLETE                                        ║"
@@ -421,6 +588,7 @@ main() {
 MODE="full"
 DRY_RUN=false
 WATCH_GPU=false
+TIMING_REPORT=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -436,16 +604,24 @@ while [[ $# -gt 0 ]]; do
             WATCH_GPU=true
             shift
             ;;
+        --timing-report)
+            TIMING_REPORT=true
+            shift
+            ;;
+        --budget)
+            BUDGET_THRESHOLD="$2"
+            shift 2
+            ;;
         --help|-h)
             head -50 "$0" | grep -E "^#" | sed 's/^# \?//'
             exit 0
             ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: $0 [--mode full|train|evaluate|deploy] [--dry-run] [--watch-gpu]"
+            echo "Usage: $0 [--mode full|train|evaluate|deploy] [--dry-run] [--watch-gpu] [--timing-report] [--budget N]"
             exit 1
             ;;
     esac
 done
 
-main "$MODE" "$DRY_RUN" "$WATCH_GPU"
+main "$MODE" "$DRY_RUN" "$WATCH_GPU" "$TIMING_REPORT"
