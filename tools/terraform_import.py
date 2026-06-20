@@ -42,6 +42,11 @@ logger = logging.getLogger("terraform_import")
 # CONSTANTS
 # ---------------------------------------------------------------------------
 
+# Terraform resource name must be a valid identifier: start with a letter or underscore,
+# followed by zero or more letters, digits, or underscores. Hyphens are NOT allowed
+# because they can corrupt Terraform state (see issue #1).
+VALID_RESOURCE_NAME_RE = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$')
+
 SUPPORTED_RESOURCE_TYPES = [
     "aws_instance",
     "aws_lb",
@@ -117,6 +122,52 @@ class ImportResult:
     duration_seconds: float = 0.0
 
 # ---------------------------------------------------------------------------
+# VALIDATION
+# ---------------------------------------------------------------------------
+
+def validate_resource_name(resource: ResourceToImport) -> Optional[str]:
+    """Validate a Terraform resource name.
+
+    Terraform resource names must be valid identifiers matching
+    ``[a-zA-Z_][a-zA-Z0-9_]*``.  Hyphenated resource names are rejected
+    because they can corrupt Terraform state.
+
+    Returns an error message string if invalid, or None if valid.
+    """
+    name = resource.resource_name
+    if not name:
+        return (
+            f"Resource name is empty for {resource.resource_type}: "
+            "every resource must have a non-empty name"
+        )
+    if not VALID_RESOURCE_NAME_RE.match(name):
+        return (
+            f"Invalid Terraform resource name '{name}' "
+            f"(type: {resource.resource_type}): "
+            "resource names must start with a letter or underscore and "
+            "contain only letters, digits, and underscores. "
+            "Hyphens are NOT allowed as they can corrupt Terraform state. "
+            "Use underscores instead (e.g. 'my_resource' not 'my-resource')."
+        )
+    return None
+
+
+def filter_invalid_resources(
+    resources: List[ResourceToImport],
+) -> Tuple[List[ResourceToImport], List[str]]:
+    """Separate valid resources from invalid ones, logging each rejection."""
+    valid: List[ResourceToImport] = []
+    errors: List[str] = []
+    for r in resources:
+        err = validate_resource_name(r)
+        if err:
+            errors.append(err)
+        else:
+            valid.append(r)
+    return valid, errors
+
+
+# ---------------------------------------------------------------------------
 # IMPORTER
 # ---------------------------------------------------------------------------
 
@@ -142,6 +193,18 @@ class TerraformImporter:
             return False
 
     def import_resource(self, resource: ResourceToImport) -> bool:
+        # Validate resource name before attempting import
+        name_error = validate_resource_name(resource)
+        if name_error:
+            logger.error(f"  ✗ {name_error}")
+            self.results.append({
+                "address": f"{resource.resource_type}.{resource.resource_name}",
+                "resource_id": resource.resource_id,
+                "status": "failed",
+                "error": name_error,
+            })
+            return False
+
         address = f"{resource.resource_type}.{resource.resource_name}"
         cmd = [
             self.terraform_binary, "import",
@@ -205,9 +268,26 @@ class TerraformImporter:
         start_time = time.time()
         import_result = ImportResult()
 
+        # Validate all resources before processing
+        valid_resources, errors = filter_invalid_resources(resources)
+        for err in errors:
+            logger.error(f"  ✗ {err}")
+            import_result.results.append({
+                "address": "",
+                "resource_id": "",
+                "status": "failed",
+                "error": err,
+            })
+            import_result.failure_count += 1
+
+        if not valid_resources:
+            logger.error("No valid resources to import")
+            import_result.duration_seconds = time.time() - start_time
+            return import_result
+
         if dry_run:
             logger.info("DRY RUN - No resources will be imported")
-            for resource in resources:
+            for resource in valid_resources:
                 address = f"{resource.resource_type}.{resource.resource_name}"
                 logger.info(f"  Would import: {address} (ID: {resource.resource_id})")
                 import_result.results.append({
@@ -223,7 +303,7 @@ class TerraformImporter:
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 future_to_resource = {
                     executor.submit(self.import_resource, resource): resource
-                    for resource in resources
+                    for resource in valid_resources
                 }
                 for future in as_completed(future_to_resource):
                     resource = future_to_resource[future]
@@ -237,7 +317,7 @@ class TerraformImporter:
                         logger.error(f"Exception processing {resource.resource_name}: {e}")
                         import_result.failure_count += 1
         else:
-            for resource in resources:
+            for resource in valid_resources:
                 success = self.import_resource(resource)
                 if success:
                     import_result.success_count += 1
@@ -259,9 +339,18 @@ class TerraformImporter:
         resources: List[ResourceToImport],
         output_file: str = "import.sh"
     ) -> str:
+        # Validate all resource names before generating script
+        valid_resources, errors = filter_invalid_resources(resources)
+        for err in errors:
+            logger.error(f"  ✗ {err}")
+
+        if not valid_resources:
+            logger.error("No valid resources to include in import script")
+            return ""
+
         lines = ["#!/bin/bash", "# Auto-generated Terraform import script", f"# Generated: {datetime.now().isoformat()}", ""]
 
-        for resource in resources:
+        for resource in valid_resources:
             address = f"{resource.resource_type}.{resource.resource_name}"
             lines.append(
                 f"terraform import -state={resource.state_file} {address} {resource.resource_id}"
