@@ -438,19 +438,48 @@ def build_module(
 
 def clean_module(module: Module, verbose: bool = False) -> bool:
     print(f"  {color('▸', Colors.YELLOW)} Cleaning {module.name}...")
+
+    start = time.time()
+    env = os.environ.copy()
+    if module.env:
+        env.update(module.env)
+
     try:
-        run_text_process(
+        result = run_text_process(
             module.clean_cmd,
             cwd=str(module.dir),
             capture_output=not verbose,
             text=True,
             timeout=60,
-            env=os.environ.copy(),
+            env=env,
         )
-        return True
-    except Exception as e:
-        print(f"    {color('✗', Colors.RED)} Clean failed: {e}")
+    except subprocess.TimeoutExpired:
+        elapsed = time.time() - start
+        print(f"    {color('✗', Colors.RED)} Clean of {module.name} TIMEOUT (60s)")
         return False
+    except FileNotFoundError as e:
+        print(f"    {color('✗', Colors.RED)} Clean of {module.name}: command not found — {e}")
+        return False
+
+    elapsed = time.time() - start
+
+    if result.returncode == 0:
+        if verbose:
+            print(f"       {color('✓', Colors.GREEN)} Clean completed in {elapsed:.2f}s")
+        return True
+
+    # Collect diagnostic output from the failed clean command
+    output_lines = []
+    if result.stdout:
+        output_lines.append(result.stdout.strip())
+    if result.stderr:
+        output_lines.append(result.stderr.strip())
+    output = "\n".join(output_lines)
+
+    print(f"    {color('✗', Colors.RED)} Clean of {module.name} FAILED (exit code {result.returncode})")
+    if output:
+        print(f"       {color(output[:600], Colors.GRAY)}")
+    return False
 
 def verify_binary(module: Module) -> Optional[str]:
     if module.build_dir is None:
