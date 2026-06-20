@@ -15,12 +15,9 @@ package analytics
 import (
 	"context"
 	"encoding/csv"
-	"encoding/json"
 	"fmt"
 	"math"
 	"math/rand"
-	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -299,6 +296,7 @@ type Collector struct {
 	flushInterval time.Duration
 	maxBacklog    int
 	stopCh        chan struct{}
+	startOnce     sync.Once
 	flushed       int64
 	errors        int64
 	dropped       int64
@@ -458,28 +456,29 @@ func (c *Collector) RecordHistogram(name string, value float64, tags ...MetricTa
 // Start begins the background flush loop. It spawns a goroutine that
 // periodically flushes collected metrics to the backend. The flush
 // loop will stop when the context is cancelled or Stop() is called.
-// NOTE: Calling Start() multiple times will spawn multiple flush
-// goroutines, causing duplicate flushes. This is a known issue.
-// TODO: Make Start() idempotent.
+// Start is idempotent: repeated calls do not create additional flush
+// loops for the same collector instance.
 func (c *Collector) Start(ctx context.Context) {
-	go func() {
-		// Tick immediately to flush any bootstrapped metrics
-		c.flush(ctx)
-		ticker := time.NewTicker(c.flushInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				// Final flush before exiting
-				c.flush(context.Background())
-				return
-			case <-c.stopCh:
-				return
-			case <-ticker.C:
-				c.flush(ctx)
+	c.startOnce.Do(func() {
+		go func() {
+			// Tick immediately to flush any bootstrapped metrics
+			c.flush(ctx)
+			ticker := time.NewTicker(c.flushInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					// Final flush before exiting
+					c.flush(context.Background())
+					return
+				case <-c.stopCh:
+					return
+				case <-ticker.C:
+					c.flush(ctx)
+				}
 			}
-		}
-	}()
+		}()
+	})
 }
 
 // Stop signals the flush loop to stop. It does NOT perform a final flush.
