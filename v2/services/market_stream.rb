@@ -55,6 +55,9 @@ require 'redis'
 require 'sinatra/base'
 require 'logger'
 
+# Local library modules
+require_relative '../lib/backoff_calculator'
+
 # ===─ Fucking Constants =================================================================================─
 
 V2_VERSION = '2.0.0'
@@ -216,10 +219,11 @@ class MarketStreamClient < EM::Connection
     # v2 reconnection: exponential backoff with max. We learned. We grew.
     return if Constants::WS_MAX_RECONNECTS && @reconnect_attempt >= Constants::WS_MAX_RECONNECTS
 
-    delay = [
-      Constants::WS_RECONNECT_BASE * (2 ** @reconnect_attempt),
-      Constants::WS_RECONNECT_MAX
-    ].min
+    delay = BackoffCalculator.delay_for(
+      @reconnect_attempt,
+      base: Constants::WS_RECONNECT_BASE,
+      max:  Constants::WS_RECONNECT_MAX
+    )
 
     @reconnect_attempt += 1
 
