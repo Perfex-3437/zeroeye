@@ -129,6 +129,25 @@ let currentTokens: AuthTokens | null = null;
 let currentUser: User | null = null;
 let refreshTimer: number | null = null;
 let authListeners: Array<(user: User | null) => void> = [];
+let inFlightRefresh: Promise<AuthTokens | null> | null = null;
+
+// BroadcastChannel for cross-tab refresh coordination
+const REFRESH_CHANNEL = 'tot-auth-refresh';
+let refreshChannel: BroadcastChannel | null = null;
+try {
+  refreshChannel = new BroadcastChannel(REFRESH_CHANNEL);
+  refreshChannel.onmessage = (event) => {
+    if (event.data?.type === 'token-refreshed' && event.data?.tokens) {
+      storeTokens(event.data.tokens);
+    }
+  };
+} catch {
+  // BroadcastChannel not supported - fall back to localStorage-only
+}
+
+// localStorage-based cross-tab coordination fallback
+const REFRESH_LOCK_KEY = 'tot_auth_refresh_lock';
+const REFRESH_TIMESTAMP_KEY = 'tot_auth_refresh_ts';
 
 // ---------------------------------------------------------------------------
 // HELPERS
@@ -277,24 +296,55 @@ export async function logout(): Promise<void> {
 }
 
 export async function refreshTokens(): Promise<AuthTokens | null> {
+  // Share in-flight refresh across concurrent calls in the same tab
+  if (inFlightRefresh) {
+    return inFlightRefresh;
+  }
+
   const tokens = currentTokens || loadStoredTokens();
   if (!tokens?.refreshToken) return null;
 
-  try {
-    const response = await post<{ tokens: AuthTokens }>('/auth/refresh', {
-      refreshToken: tokens.refreshToken,
-    });
-
-    storeTokens(response.data.tokens);
-    scheduleTokenRefresh(response.data.tokens);
-
-    return response.data.tokens;
-  } catch {
-    clearStoredTokens();
-    currentUser = null;
-    notifyListeners(null);
-    return null;
+  // Check localStorage-based coordination for cross-tab
+  const lockTimestamp = localStorage.getItem(REFRESH_TIMESTAMP_KEY);
+  if (lockTimestamp) {
+    const age = Date.now() - parseInt(lockTimestamp, 10);
+    // If another tab refreshed within last 5s, rely on stored tokens
+    if (age < 5000) {
+      const storedTokens = loadStoredTokens();
+      if (storedTokens) return storedTokens;
+    }
   }
+
+  inFlightRefresh = (async (): Promise<AuthTokens | null> => {
+    try {
+      localStorage.setItem(REFRESH_TIMESTAMP_KEY, String(Date.now()));
+      const response = await post<{ tokens: AuthTokens }>('/auth/refresh', {
+        refreshToken: tokens.refreshToken,
+      });
+
+      storeTokens(response.data.tokens);
+      scheduleTokenRefresh(response.data.tokens);
+
+      // Broadcast token update to other tabs
+      if (refreshChannel) {
+        refreshChannel.postMessage({
+          type: 'token-refreshed',
+          tokens: response.data.tokens,
+        });
+      }
+
+      return response.data.tokens;
+    } catch {
+      clearStoredTokens();
+      currentUser = null;
+      notifyListeners(null);
+      return null;
+    } finally {
+      inFlightRefresh = null;
+    }
+  })();
+
+  return inFlightRefresh;
 }
 
 export async function getCurrentUser(): Promise<User | null> {
