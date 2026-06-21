@@ -40,6 +40,12 @@ import sys
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
+# Circuit breaker state
+_circuit_state: dict[str, dict] = {}
+CIRCUIT_CLOSED = "closed"
+CIRCUIT_OPEN = "open"
+CIRCUIT_HALF_OPEN = "half_open"
+
 
 # ---------------------------------------------------------------------------
 # CONSTANTS
@@ -299,6 +305,39 @@ def print_health_report(results: Dict[str, Any]):
                             print(f"      {sub_icon} {sub_name}: {sub_check['detail']}")
     print()
 
+
+
+def _get_circuit(service: str) -> dict:
+    if service not in _circuit_state:
+        _circuit_state[service] = {
+            "state": CIRCUIT_CLOSED,
+            "failures": 0,
+            "threshold": 3,
+            "cooldown": 30,
+            "last_failure": 0,
+        }
+    return _circuit_state[service]
+
+def _check_circuit(service: str) -> bool:
+    cb = _get_circuit(service)
+    if cb["state"] == CIRCUIT_OPEN:
+        if time.time() - cb["last_failure"] > cb["cooldown"]:
+            cb["state"] = CIRCUIT_HALF_OPEN
+            return True
+        return False
+    return True
+
+def _record_failure(service: str):
+    cb = _get_circuit(service)
+    cb["failures"] += 1
+    cb["last_failure"] = time.time()
+    if cb["failures"] >= cb["threshold"]:
+        cb["state"] = CIRCUIT_OPEN
+
+def _record_success(service: str):
+    cb = _get_circuit(service)
+    cb["failures"] = 0
+    cb["state"] = CIRCUIT_CLOSED
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Health check tool")
