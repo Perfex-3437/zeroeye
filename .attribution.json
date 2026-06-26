@@ -1,0 +1,29 @@
+{
+  "repository": "foxyManTou/kickama-foxy-trials",
+  "issue": 1,
+  "bounty": "$10",
+  "contributor": "lb1192176991-lab",
+  "description": "Add configurable timeout and rate limiting to health_check probes",
+  "changes": [
+    "Added TokenBucket rate limiter class with thread-safe acquire/stats/reset",
+    "Added --timeout CLI flag for per-probe timeout configuration",
+    "Added --probe-rate CLI flag for rate limiting (max probes/second)",
+    "Integrated rate limiter with circuit breaker: HALF_OPEN state reduces rate to 50%",
+    "Added rate limiter stats to health check aggregation report",
+    "Added 15 unit tests covering rate limiter logic, timeout handling, and half-open rate reduction"
+  ],
+  "files_modified": [
+    "tools/health_check.py"
+  ],
+  "files_added": [
+    "tools/tests/test_health_check.py"
+  ],
+  "diagnostic_artifacts": [
+    "diagnostic/build-94e0fb08-part001.logd",
+    "diagnostic/build-94e0fb08-part002.logd",
+    "diagnostic/build-94e0fb08-part003.logd",
+    "diagnostic/build-94e0fb08-part004.logd",
+    "diagnostic/build-94e0fb08-part005.logd",
+    "diagnostic/build-94e0fb08.json"
+  ]
+}
