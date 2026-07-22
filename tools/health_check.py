@@ -1,4 +1,4 @@
-usr/bin/env python3
+#!/usr/bin/env python3
 """
 Health check tool for the Tent of Trials platform.
 Performs comprehensive health checks across all services and reports
